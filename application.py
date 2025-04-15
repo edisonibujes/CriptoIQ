@@ -4,31 +4,20 @@ from flask_cors import CORS
 from util.common import domain, port, prefix, build_swagger_config_json
 from resources.swaggerConfig import SwaggerConfig
 from resources.bookResource import BooksGETResource, BookGETResource, BookPOSTResource, BookPUTResource, BookDELETEResource
-from flask_swagger_ui import get_swaggerui_blueprint
+from flasgger import Swagger
+from resources.crypto_resource import CryptoPriceResource
+from scripts.data_ingestion_service import DataIngestionService
+from scripts.data_processing_service import DataProcessingService
 
 # ============================================
 # Main
 # ============================================
 application = Flask(__name__)
+swagger = Swagger(application)
 app = application
 app.config['PROPAGATE_EXCEPTIONS'] = True
 CORS(app)
 api = Api(app, prefix=prefix, catch_all_404s=True)
-
-# ============================================
-# Swagger
-# ============================================
-build_swagger_config_json()
-swaggerui_blueprint = get_swaggerui_blueprint(
-    prefix,
-    f'http://{domain}:{port}{prefix}/swagger-config',
-    config={
-        'app_name': "Flask API",
-        "layout": "BaseLayout",
-        "docExpansion": "none"
-    },
-)
-app.register_blueprint(swaggerui_blueprint)
 
 # ============================================
 # Error Handler
@@ -51,13 +40,14 @@ def handle_method_not_allowed_error(e):
 
 @app.route('/')
 def redirect_to_prefix():
-    if prefix != '':
-        return redirect(prefix)
+    return redirect("/apidocs")  # Redirige directamente a Swagger UI
 
 
 # ============================================
 # Add Resource
 # ============================================
+api.add_resource(CryptoPriceResource, '/crypto-data')
+
 # GET swagger config
 api.add_resource(SwaggerConfig, '/swagger-config')
 # GET books
