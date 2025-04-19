@@ -5,9 +5,9 @@ from util.common import domain, port, prefix, build_swagger_config_json
 from resources.swaggerConfig import SwaggerConfig
 from resources.bookResource import BooksGETResource, BookGETResource, BookPOSTResource, BookPUTResource, BookDELETEResource
 from flasgger import Swagger
-from resources.crypto_resource import CryptoPriceResource
 from scripts.data_ingestion_service import DataIngestionService
 from scripts.data_processing_service import DataProcessingService
+from resources.crypto_resource import CryptoHistoricalResource, CryptoCurrentPriceResource
 
 # ============================================
 # Main
@@ -46,7 +46,8 @@ def redirect_to_prefix():
 # ============================================
 # Add Resource
 # ============================================
-api.add_resource(CryptoPriceResource, '/crypto-data')
+api.add_resource(CryptoHistoricalResource, '/crypto-data')           # historial
+api.add_resource(CryptoCurrentPriceResource, '/crypto-data-actual')  # precio actual
 
 # GET swagger config
 api.add_resource(SwaggerConfig, '/swagger-config')

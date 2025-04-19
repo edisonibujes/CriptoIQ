@@ -1,3 +1,4 @@
+# crypto_resource.py
 from flask_restful import Resource
 from flask import request
 from scripts.data_ingestion_service import DataIngestionService
@@ -6,7 +7,25 @@ import requests
 
 class CryptoHistoricalResource(Resource):
     @swag_from({
-        'tags': ['Cripto'],
+        'responses': {
+            200: {
+                'description': 'Datos de precios históricos',
+                'examples': {
+                    'application/json': {
+                        "status": "success",
+                        "coin": "bitcoin",
+                        "records": 5,
+                        "data": [
+                            {
+                                "timestamp": "2025-04-10T00:00:00",
+                                "price": 70000.0,
+                                "coin": "bitcoin"
+                            }
+                        ]
+                    }
+                }
+            }
+        },
         'parameters': [
             {
                 'name': 'coin',
@@ -23,11 +42,7 @@ class CryptoHistoricalResource(Resource):
                 'description': 'Número de días hacia atrás (ej: 30)'
             }
         ],
-        'responses': {
-            200: {
-                'description': 'Historial de precios'
-            }
-        }
+        'tags': ['Cripto']
     })
     def get(self):
         coin_id = request.args.get('coin', 'bitcoin')
@@ -45,6 +60,7 @@ class CryptoHistoricalResource(Resource):
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}, 500
+
 
 class CryptoCurrentPriceResource(Resource):
     @swag_from({
@@ -88,3 +104,5 @@ class CryptoCurrentPriceResource(Resource):
             'moneda': coin_name,
             'precio_usd': response.json()[coin_name]['usd']
         }
+
+
