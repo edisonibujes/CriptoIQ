@@ -8,6 +8,8 @@ from flasgger import Swagger
 from scripts.data_ingestion_service import DataIngestionService
 from scripts.data_processing_service import DataProcessingService
 from resources.crypto_resource import CryptoHistoricalResource, CryptoCurrentPriceResource
+from resources.telegram_service import TelegramMessageResource
+
 
 # ============================================
 # Main
@@ -48,6 +50,8 @@ def redirect_to_prefix():
 # ============================================
 api.add_resource(CryptoHistoricalResource, '/crypto-data')           # historial
 api.add_resource(CryptoCurrentPriceResource, '/crypto-data-actual')  # precio actual
+api.add_resource(TelegramMessageResource, '/enviar-mensaje-telegram')
+
 
 # GET swagger config
 api.add_resource(SwaggerConfig, '/swagger-config')
