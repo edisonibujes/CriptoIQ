@@ -104,7 +104,7 @@ def main():
 
 def handle_message(message):
     chat_id = message["chat"]["id"]
-    text = message.get("text", "")
+    text = message.get("text", "").strip()
 
     if text.lower().startswith("/ayuda"):
         ayuda = (
@@ -117,18 +117,15 @@ def handle_message(message):
         )
         send_message(chat_id, ayuda)
 
-    elif text.lower().startswith("/precio"):
-        partes = text.split()
-        if len(partes) == 3:
-            moneda = partes[1].lower()
-            try:
-                dias = int(partes[2])
-                resultado = obtener_analisis(moneda, dias)
-            except ValueError:
-                resultado = "⚠️ El número de días debe ser un entero."
+    elif text.lower() == "/alarmas":
+        user_alarmas = [a for a in alarmas if a["chat_id"] == chat_id]
+        if user_alarmas:
+            mensaje = "🔔 Tus alarmas:\n" + "\n".join([
+                f"• {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}" for a in user_alarmas
+            ])
         else:
-            resultado = "❗ Usa el formato: /precio bitcoin 7"
-        send_message(chat_id, resultado)
+            mensaje = "⛔ No tienes alarmas activas."
+        send_message(chat_id, mensaje)
 
     elif text.lower().startswith("/alarma"):
         partes = text.strip().split()
@@ -168,6 +165,7 @@ def handle_message(message):
                 send_message(chat_id, "⚠️ El precio debe ser numérico. Ej: /alarma bitcoin 30000")
         else:
             send_message(chat_id, "❗ Usa el formato: /alarma bitcoin 30000")
+
 
     elif text.lower().startswith("/alarmas"):
         user_alarmas = [a for a in alarmas if a["chat_id"] == chat_id]
