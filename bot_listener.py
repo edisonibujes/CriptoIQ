@@ -1,3 +1,89 @@
+
+import requests
+from flask import Flask, request, jsonify
+
+BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+_symbol_cache = {}
+
+def _build_symbol_cache():
+    global _symbol_cache
+    try:
+        r = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        for s in data.get("symbols", []):
+            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                base = s["baseAsset"].lower()
+                _symbol_cache[base] = s["symbol"]
+    except Exception as e:
+        print(f"⚠️ No se pudo construir caché de símbolos: {e}")
+
+def run_flask():
+    app = Flask(__name__)
+    _build_symbol_cache()
+
+    @app.route('/crypto-data-actual')
+    def crypto_data():
+        name = request.args.get("name", "bitcoin").lower()
+
+        # Alias comunes → símbolos
+        alias_map = {
+            "bitcoin": "btc",
+            "ethereum": "eth",
+            "binance coin": "bnb",
+            "dogecoin": "doge",
+            "solana": "sol",
+            "cardano": "ada",
+            "ripple": "xrp",
+            "polkadot": "dot",
+            "litecoin": "ltc",
+            "tron": "trx",
+        }
+        name = alias_map.get(name, name)
+
+
+        if not _symbol_cache:
+            _build_symbol_cache()
+
+        symbol = _symbol_cache.get(name)
+        if not symbol:
+            return jsonify({"error": "Moneda no soportada en Binance"}), 400
+
+        try:
+            url = "https://api.binance.com/api/v3/klines"
+            params = {
+                "symbol": symbol,
+                "interval": "1h",
+                "limit": 10
+            }
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            volumen_rojo = 0
+            volumen_verde = 0
+            precio_actual = float(data[-1][4])
+
+            for vela in data:
+                open_price = float(vela[1])
+                close_price = float(vela[4])
+                volume = float(vela[5])
+                if close_price >= open_price:
+                    volumen_verde += volume
+                else:
+                    volumen_rojo += volume
+
+            return jsonify({
+                "volumen_verde": volumen_verde,
+                "volumen_rojo": volumen_rojo,
+                "precio": precio_actual
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    app.run(host="127.0.0.1", port=5000)
+
+
 import requests
 import time
 import json
@@ -30,66 +116,40 @@ def send_message(chat_id, text):
     response = requests.post(url, json=payload)
     print(f"📡 Respuesta de Telegram: {response.status_code} - {response.text}")
 
-def obtener_analisis(moneda, dias):
-    valid_ids_url = "https://api.coingecko.com/api/v3/coins/list"
-    try:
-        ids_response = requests.get(valid_ids_url)
-        ids_data = ids_response.json()
-        ids_disponibles = [item['id'] for item in ids_data]
-        if moneda not in ids_disponibles:
-            sugerencias = [id for id in ids_disponibles if moneda in id][:5]
-            sugerencia_texto = ("\n👉 ¿Quizás quisiste decir?:\n" + "\n".join(sugerencias)) if sugerencias else ""
-            return f"❌ '{moneda}' no es un ID válido en CoinGecko.{sugerencia_texto}"
-    except Exception as e:
-        print(f"⚠️ Error al verificar ID de moneda: {e}")
-
-    url = f"https://api.coingecko.com/api/v3/coins/{moneda}/market_chart"
-    params = {"vs_currency": "usd", "days": dias}
-    response = requests.get(url, params=params)
-
-    if response.status_code != 200:
-        return f"❌ Error: no se pudo consultar {moneda}. Verifica el nombre."
-
-    data = response.json()
-    precios_brutos = data.get("prices", [])
-    precios = [p[1] for p in precios_brutos if isinstance(p, list) and len(p) == 2 and isinstance(p[1], (int, float)) and p[1] > 0]
-
-    if not precios:
-        return f"⚠️ No se encontraron precios válidos para {moneda} en los últimos {dias} días."
-
-    max_price = max(precios)
-    min_price = min(precios)
-    current_price = precios[-1]
-
-    diff_max = ((max_price - current_price) / max_price) * 100
-    diff_min = ((current_price - min_price) / min_price) * 100
-
-    mensaje = (
-        f"📊 Análisis de {moneda.upper()} (últimos {dias} días):\n"
-        f"💰 Precio actual: ${current_price:.2f}\n"
-        f"📈 Máximo: ${max_price:.2f} ({diff_max:.2f}% por debajo)\n"
-        f"📉 Mínimo: ${min_price:.2f} ({diff_min:.2f}% por encima)"
-    )
-    return mensaje
-
 def verificar_alarmas_tick():
     for alarma in alarmas[:]:
-        moneda = alarma["moneda"]
-        chat_id = alarma["chat_id"]
-        precio_objetivo = alarma["precio_objetivo"]
-        try:
-            url = f"https://api.coingecko.com/api/v3/simple/price"
-            params = {"ids": moneda, "vs_currencies": "usd"}
-            r = requests.get(url, params=params)
-            if r.status_code == 200:
-                data = r.json()
-                precio_actual = data.get(moneda, {}).get("usd", 0)
-                if precio_actual >= precio_objetivo:
-                    send_message(chat_id, f"🚨 ¡{moneda.upper()} ha alcanzado ${precio_actual:.2f}!")
-                    alarmas.remove(alarma)
-                    guardar_alarmas()
-        except Exception as e:
-            print(f"⚠️ Error verificando alarma: {e}")
+        if "precio_objetivo" in alarma:
+            moneda = alarma["moneda"]
+            chat_id = alarma["chat_id"]
+            try:
+                r = requests.get(f"https://api.coingecko.com/api/v3/simple/price", params={"ids": moneda, "vs_currencies": "usd"})
+                if r.status_code == 200:
+                    data = r.json()
+                    precio_actual = data.get(moneda, {}).get("usd", 0)
+                    if precio_actual >= alarma["precio_objetivo"]:
+                        send_message(chat_id, f"🚨 ¡{moneda.upper()} ha alcanzado ${precio_actual:.2f}!")
+                        alarmas.remove(alarma)
+                        guardar_alarmas()
+            except Exception as e:
+                print(f"⚠️ Error verificando alarma de precio: {e}")
+
+        if "tipo_volumen" in alarma:
+            moneda = alarma["moneda"]
+            chat_id = alarma["chat_id"]
+            tipo = alarma["tipo_volumen"]
+            umbral = alarma.get("umbral", 30000 if tipo == "verde" else 60000)
+            try:
+                r = requests.get(CRYPTO_API, params={"name": moneda})
+                if r.status_code == 200:
+                    data = r.json()
+                    volumen = data.get("volumen_verde" if tipo == "verde" else "volumen_rojo", 0)
+                    if volumen > umbral:
+                        color = "🟢" if tipo == "verde" else "🔴"
+                        send_message(chat_id, f"{color} ¡Alerta! Volumen {tipo.upper()} de {moneda.upper()} supera {umbral}: {volumen}")
+                        alarmas.remove(alarma)
+                        guardar_alarmas()
+            except Exception as e:
+                print(f"⚠️ Error verificando volumen: {e}")
 
 def main():
     print("📱 Escuchando mensajes del bot...")
@@ -113,83 +173,127 @@ def handle_message(message):
             "/alarma <moneda> <precio> — Alerta si el precio sube.\n"
             "/alarmas — Lista tus alarmas.\n"
             "/eliminaralarma <moneda> — Borra una alarma.\n"
-            "/crypto precio <moneda> — Precio actual desde API externa."
+            "/crypto precio <moneda> — Precio actual desde API externa.\n"
+            "/monedas — Lista algunas monedas compatibles con el bot.\n"
+            "/alarma volumen <moneda> <verde|rojo> <umbral> — Alerta de volumen personalizada.\n"
+            "/eliminarvolumen <moneda> <verde|rojo> — Elimina una alarma de volumen."
         )
         send_message(chat_id, ayuda)
 
-    elif text.lower() == "/alarmas":
-        user_alarmas = [a for a in alarmas if a["chat_id"] == chat_id]
-        if user_alarmas:
-            mensaje = "🔔 Tus alarmas:\n" + "\n".join([
-                f"• {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}" for a in user_alarmas
-            ])
-        else:
-            mensaje = "⛔ No tienes alarmas activas."
-        send_message(chat_id, mensaje)
 
-    elif text.lower().startswith("/alarma"):
-        partes = text.strip().split()
+    elif text.lower().startswith("/precio"):
+        partes = text.split()
         if len(partes) == 3:
             moneda = partes[1].lower()
-            valid_ids_url = "https://api.coingecko.com/api/v3/coins/list"
             try:
-                ids_response = requests.get(valid_ids_url)
-                ids_data = ids_response.json()
-                ids_disponibles = [item['id'] for item in ids_data]
-                if moneda not in ids_disponibles:
-                    sugerencias = [id for id in ids_disponibles if moneda in id][:5]
-                    sugerencia_texto = ("\n👉 ¿Quizás quisiste decir?:\n" + "\n".join(sugerencias)) if sugerencias else ""
-                    send_message(chat_id, f"❌ '{moneda}' no es un ID válido en CoinGecko.{sugerencia_texto}")
-                    return
+                dias = int(partes[2])
+                url = f"https://api.coingecko.com/api/v3/coins/{moneda}/market_chart"
+                params = {"vs_currency": "usd", "days": dias}
+                r = requests.get(url, params=params)
+                if r.status_code == 200:
+                    data = r.json()
+                    precios = [p[1] for p in data.get("prices", []) if isinstance(p, list) and len(p) == 2]
+                    if precios:
+                        max_price = max(precios)
+                        min_price = min(precios)
+                        actual = precios[-1]
+                        msg = (
+                            f"📊 {moneda.upper()} últimos {dias} días:\n"
+                            f"💰 Actual: ${actual:.2f}\n"
+                            f"📈 Máximo: ${max_price:.2f}\n"
+                            f"📉 Mínimo: ${min_price:.2f}"
+                        )
+                    else:
+                        msg = "⚠️ No se encontraron datos válidos."
+                else:
+                    msg = "❌ Error consultando precios."
             except Exception as e:
-                print(f"⚠️ Error al verificar ID de moneda: {e}")
+                msg = f"⚠️ Error al obtener precios: {e}"
+            send_message(chat_id, msg)
+
+
+    elif text.lower().startswith("/alarma volumen"):
+        partes = text.split()
+        if len(partes) == 5:
+            moneda, tipo, umbral = partes[2].lower(), partes[3].lower(), partes[4]
             try:
-                precio_objetivo = float(partes[2])
-                actualizada = False
+                umbral = float(umbral)
+                if tipo not in ["verde", "rojo"]:
+                    raise ValueError()
                 for a in alarmas:
-                    if a["chat_id"] == chat_id and a["moneda"] == moneda:
-                        a["precio_objetivo"] = precio_objetivo
-                        actualizada = True
-                        break
-                if not actualizada:
-                    alarma = {
-                        "chat_id": chat_id,
-                        "moneda": moneda,
-                        "precio_objetivo": precio_objetivo
-                    }
-                    alarmas.append(alarma)
+                    if a["chat_id"] == chat_id and a.get("moneda") == moneda and a.get("tipo_volumen") == tipo:
+                        a["umbral"] = umbral
+                        guardar_alarmas()
+                        send_message(chat_id, f"🔄 Alarma de volumen {tipo.upper()} de {moneda.upper()} actualizada.")
+                        return
+                alarmas.append({
+                    "chat_id": chat_id,
+                    "moneda": moneda,
+                    "tipo_volumen": tipo,
+                    "umbral": umbral
+                })
                 guardar_alarmas()
-                estado = "🔄 Alarma actualizada" if actualizada else "⏰ Alarma configurada"
-                send_message(chat_id, f"{estado} para {moneda.upper()} a ${precio_objetivo:.2f}")
-            except ValueError:
-                send_message(chat_id, "⚠️ El precio debe ser numérico. Ej: /alarma bitcoin 30000")
-        else:
-            send_message(chat_id, "❗ Usa el formato: /alarma bitcoin 30000")
+                send_message(chat_id, f"📊 Alarma configurada para volumen {tipo.upper()} de {moneda.upper()} con umbral {umbral}")
+            except:
+                send_message(chat_id, "⚠️ Formato incorrecto. Usa: /alarma volumen <moneda> <verde|rojo> <umbral>")
 
-
-    elif text.lower().startswith("/alarmas"):
-        user_alarmas = [a for a in alarmas if a["chat_id"] == chat_id]
-        if user_alarmas:
-            mensaje = "🔔 Tus alarmas:\n" + "\n".join([
-                f"• {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}" for a in user_alarmas
-            ])
-        else:
-            mensaje = "⛔ No tienes alarmas activas."
-        send_message(chat_id, mensaje)
+    elif text.lower().startswith("/alarma"):
+        partes = text.split()
+        if len(partes) == 3:
+            moneda = partes[1].lower()
+            try:
+                precio = float(partes[2])
+                for a in alarmas:
+                    if a["chat_id"] == chat_id and a.get("moneda") == moneda and "precio_objetivo" in a:
+                        a["precio_objetivo"] = precio
+                        guardar_alarmas()
+                        send_message(chat_id, f"🔄 Alarma de {moneda.upper()} actualizada a ${precio}")
+                        return
+                alarmas.append({
+                    "chat_id": chat_id,
+                    "moneda": moneda,
+                    "precio_objetivo": precio
+                })
+                guardar_alarmas()
+                send_message(chat_id, f"⏰ Alarma configurada para {moneda.upper()} a ${precio}")
+            except:
+                send_message(chat_id, "⚠️ Usa el formato: /alarma bitcoin 30000")
 
     elif text.lower().startswith("/eliminaralarma"):
         partes = text.split()
         if len(partes) == 2:
             moneda = partes[1].lower()
-            original = len(alarmas)
-            alarmas[:] = [a for a in alarmas if not (a["chat_id"] == chat_id and a["moneda"] == moneda)]
-            if len(alarmas) < original:
+            prev = len(alarmas)
+            alarmas[:] = [a for a in alarmas if not (a["chat_id"] == chat_id and a.get("moneda") == moneda and "precio_objetivo" in a)]
+            if len(alarmas) < prev:
                 guardar_alarmas()
                 send_message(chat_id, f"🗑️ Alarma de {moneda.upper()} eliminada.")
             else:
-                send_message(chat_id, f"⚠️ No se encontró alarma para {moneda.upper()}.")
-        else:
-            send_message(chat_id, "❗ Usa el formato: /eliminaralarma bitcoin")
+                send_message(chat_id, f"⚠️ No había alarma de {moneda.upper()}.")
+
+    elif text.lower().startswith("/eliminarvolumen"):
+        partes = text.split()
+        if len(partes) == 3:
+            moneda, tipo = partes[1].lower(), partes[2].lower()
+            prev = len(alarmas)
+            alarmas[:] = [a for a in alarmas if not (a["chat_id"] == chat_id and a.get("moneda") == moneda and a.get("tipo_volumen") == tipo)]
+            if len(alarmas) < prev:
+                guardar_alarmas()
+                send_message(chat_id, f"🗑️ Alarma de volumen {tipo.upper()} de {moneda.upper()} eliminada.")
+            else:
+                send_message(chat_id, f"⚠️ No había esa alarma activa.")
+
+    elif text.lower() == "/alarmas":
+        user_alarmas = [a for a in alarmas if a["chat_id"] == chat_id]
+        if not user_alarmas:
+            send_message(chat_id, "⛔ No tienes alarmas activas.")
+            return
+        mensaje = "🔔 Tus alarmas:\n" + "\n".join(
+            f"• {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}" if "precio_objetivo" in a else
+            f"• Volumen {a['tipo_volumen'].upper()} de {a['moneda'].upper()} > {a['umbral']}"
+            for a in user_alarmas
+        )
+        send_message(chat_id, mensaje)
 
     elif text.lower().startswith("/crypto precio"):
         partes = text.split()
@@ -200,17 +304,34 @@ def handle_message(message):
                 if r.status_code == 200:
                     data = r.json()
                     precio = data.get("precio_usd")
-                    if precio is None:
-                        msg = f"⚠️ No se pudo leer el precio de {moneda.upper()}."
+                    if precio is not None:
+                        send_message(chat_id, f"💰 El precio de {moneda.upper()} es: ${precio:.2f} USD")
                     else:
-                        msg = f"💰 El precio de {moneda.upper()} es: ${precio:.2f} USD"
+                        send_message(chat_id, f"⚠️ No se encontró el precio de {moneda.upper()}.")
                 else:
-                    msg = f"❌ No se pudo obtener el precio de '{moneda}'."
+                    send_message(chat_id, f"❌ No se pudo obtener el precio de '{moneda}'.")
             except Exception as e:
-                msg = f"⚠️ Error consultando la API: {e}"
-            send_message(chat_id, msg)
+                send_message(chat_id, f"⚠️ Error consultando la API: {e}")
         else:
             send_message(chat_id, "❗ Usa el formato: /crypto precio bitcoin")
+
+    elif text.lower() == "/monedas":
+        try:
+            ids_url = "https://api.coingecko.com/api/v3/coins/list"
+            response = requests.get(ids_url)
+            data = response.json()
+            nombres = [f"{item['id']} ({item['symbol'].upper()})" for item in data[:100]]
+            mensaje = "🪙 Algunas monedas compatibles:\n" + "\n".join(nombres)
+            mensaje += "\n\n🔎 Puedes consultar más monedas en: https://www.coingecko.com/es"
+        except Exception as e:
+            mensaje = f"⚠️ Error al obtener lista de monedas: {e}"
+        send_message(chat_id, mensaje)
+
+import threading
+
+# --- Servidor Flask corriendo en segundo plano ---
+threading.Thread(target=run_flask, daemon=True).start()
+
 
 if __name__ == "__main__":
     main()
