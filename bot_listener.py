@@ -90,7 +90,7 @@ import json
 import os
 
 print("🔥 Iniciando bot_listener")
-BOT_TOKEN = "7674766197:AAFB6QlNXkspIXejhmz8rCJGM-yDAm9I5u8"
+BOT_TOKEN = "7674766197:AAEwF84b6WR40XWpbilzo5DpzgowKk1K454"
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 CRYPTO_API = "http://127.0.0.1:5000/crypto-data-actual"
 ALARM_FILE = "alarmas.json"
@@ -187,30 +187,47 @@ def handle_message(message):
             moneda = partes[1].lower()
             try:
                 dias = int(partes[2])
+                # Consultar datos históricos (precio)
                 url = f"https://api.coingecko.com/api/v3/coins/{moneda}/market_chart"
                 params = {"vs_currency": "usd", "days": dias}
                 r = requests.get(url, params=params)
+                precios = []
                 if r.status_code == 200:
                     data = r.json()
                     precios = [p[1] for p in data.get("prices", []) if isinstance(p, list) and len(p) == 2]
-                    if precios:
-                        max_price = max(precios)
-                        min_price = min(precios)
-                        actual = precios[-1]
-                        msg = (
-                            f"📊 {moneda.upper()} últimos {dias} días:\n"
-                            f"💰 Actual: ${actual:.2f}\n"
-                            f"📈 Máximo: ${max_price:.2f}\n"
-                            f"📉 Mínimo: ${min_price:.2f}"
-                        )
-                    else:
-                        msg = "⚠️ No se encontraron datos válidos."
-                else:
-                    msg = "❌ Error consultando precios."
-            except Exception as e:
-                msg = f"⚠️ Error al obtener precios: {e}"
-            send_message(chat_id, msg)
+                
+                # Consultar datos de volumen actual (verde y rojo)
+                r_vol = requests.get(CRYPTO_API, params={"name": moneda})
+                volumen_verde = volumen_rojo = None
+                if r_vol.status_code == 200:
+                    data_vol = r_vol.json()
+                    volumen_verde = data_vol.get("volumen_verde", 0)
+                    volumen_rojo = data_vol.get("volumen_rojo", 0)
 
+                # Preparar mensaje
+                if precios:
+                    max_price = max(precios)
+                    min_price = min(precios)
+                    actual = precios[-1]
+                    msg = (
+                        f"📊 {moneda.upper()} últimos {dias} días:\n"
+                        f"💰 Actual: ${actual:.2f}\n"
+                        f"📈 Máximo: ${max_price:.2f}\n"
+                        f"📉 Mínimo: ${min_price:.2f}"
+                    )
+                    if volumen_verde is not None and volumen_rojo is not None:
+                        msg += (
+                            f"\n\n📦 Volumen 1h:\n"
+                            f"🟢 Verde: {volumen_verde:.2f}\n"
+                            f"🔴 Rojo: {volumen_rojo:.2f}"
+                        )
+                else:
+                    msg = "⚠️ No se encontraron datos válidos para el precio."
+
+            except Exception as e:
+                msg = f"⚠️ Error al obtener datos: {e}"
+
+            send_message(chat_id, msg)
 
     elif text.lower().startswith("/alarma volumen"):
         partes = text.split()
