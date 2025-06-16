@@ -203,18 +203,38 @@ def handle_message(message):
                     data_vol = r_vol.json()
                     volumen_verde = data_vol.get("volumen_verde", 0)
                     volumen_rojo = data_vol.get("volumen_rojo", 0)
-
+                    
                 # Preparar mensaje
                 if precios:
                     max_price = max(precios)
                     min_price = min(precios)
                     actual = precios[-1]
+
+                    pct_bajo_max = ((max_price - actual) / max_price) * 100 if max_price else 0
+                    pct_sobre_min = ((actual - min_price) / min_price) * 100 if min_price else 0
+
+                    # Etiquetas descriptivas
+                    if pct_bajo_max < 2:
+                        max_label = "✅ muy cerca del máximo"
+                    elif pct_bajo_max > 10:
+                        max_label = "📉 lejos del máximo"
+                    else:
+                        max_label = "↔️ distancia moderada al máximo"
+
+                    if pct_sobre_min > 30:
+                        min_label = "📈 muy por encima del mínimo"
+                    elif pct_sobre_min < 5:
+                        min_label = "🔻 cerca del mínimo"
+                    else:
+                        min_label = "↔️ distancia moderada al mínimo"
+
                     msg = (
                         f"📊 {moneda.upper()} últimos {dias} días:\n"
                         f"💰 Actual: ${actual:.2f}\n"
-                        f"📈 Máximo: ${max_price:.2f}\n"
-                        f"📉 Mínimo: ${min_price:.2f}"
+                        f"📈 Máximo: ${max_price:.2f} ({pct_bajo_max:.2f}% por debajo) — {max_label}\n"
+                        f"📉 Mínimo: ${min_price:.2f} ({pct_sobre_min:.2f}% por encima) — {min_label}"
                     )
+
                     if volumen_verde is not None and volumen_rojo is not None:
                         msg += (
                             f"\n\n📦 Volumen 1h:\n"
@@ -223,6 +243,8 @@ def handle_message(message):
                         )
                 else:
                     msg = "⚠️ No se encontraron datos válidos para el precio."
+
+                           
 
             except Exception as e:
                 msg = f"⚠️ Error al obtener datos: {e}"
