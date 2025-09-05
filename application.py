@@ -2,14 +2,18 @@ from flask import Flask, jsonify, redirect
 from flask_restful import Api, MethodNotAllowed, NotFound
 from flask_cors import CORS
 from util.common import domain, port, prefix, build_swagger_config_json
+print(f"📍 API registrada con prefijo: {prefix}")
+
+# Recursos RESTful
 from resources.swaggerConfig import SwaggerConfig
 from resources.bookResource import BooksGETResource, BookGETResource, BookPOSTResource, BookPUTResource, BookDELETEResource
+from resources.crypto_resource import CryptoHistoricalResource, CryptoCurrentPriceResource
+from resources.telegram_service import TelegramMessageResource
+from resources.ema_graph_resource import EMAGraphResource  # ✅ solo una vez
+
 from flasgger import Swagger
 from scripts.data_ingestion_service import DataIngestionService
 from scripts.data_processing_service import DataProcessingService
-from resources.crypto_resource import CryptoHistoricalResource, CryptoCurrentPriceResource
-from resources.telegram_service import TelegramMessageResource
-
 
 # ============================================
 # Main
@@ -19,7 +23,12 @@ swagger = Swagger(application)
 app = application
 app.config['PROPAGATE_EXCEPTIONS'] = True
 CORS(app)
+
 api = Api(app, prefix=prefix, catch_all_404s=True)
+
+# Registrar recursos
+api.add_resource(EMAGraphResource, '/ema-graph')  # ✅ aquí va perfectamente
+
 
 # ============================================
 # Error Handler
@@ -53,6 +62,8 @@ api.add_resource(CryptoCurrentPriceResource, '/crypto-data-actual')  # precio ac
 api.add_resource(TelegramMessageResource, '/enviar-mensaje-telegram')
 
 
+
+
 # GET swagger config
 api.add_resource(SwaggerConfig, '/swagger-config')
 # GET books
@@ -64,6 +75,11 @@ api.add_resource(BookPOSTResource, '/books')
 api.add_resource(BookPUTResource, '/books/<int:id>')
 # DELETE book
 api.add_resource(BookDELETEResource, '/books/<int:id>')
+
+
+# Mostrar todos los endpoints registrados
+for rule in app.url_map.iter_rules():
+    print(f"📍 Ruta registrada: {rule}")
 
 if __name__ == '__main__':
     app.run(debug=True)

@@ -1,32 +1,133 @@
-
+# bot_listener.py
+import os
+import json
+import time
+import threading
 import requests
-from flask import Flask, request, jsonify
 
-BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-_symbol_cache = {}
+print("🔥 Iniciando bot_listener")
 
-def _build_symbol_cache():
-    global _symbol_cache
+# =========================
+# Configuración principal
+# =========================
+BOT_TOKEN = "7674766197:AAEwF84b6WR40XWpbilzo5DpzgowKk1K454"  # <-- PON AQUÍ TU TOKEN DE TELEGRAM
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# Mini-API interna del bot (NO chocar con application.py en 5000)
+LOCAL_FLASK_PORT = 5001
+CRYPTO_API = f"http://127.0.0.1:{LOCAL_FLASK_PORT}/crypto-data-actual"
+
+# Tu application.py imprimió prefijo VACÍO => deja cadena vacía
+# Si algún día imprime "/api", cambia a: API_PREFIX = "/api"
+API_PREFIX = ""
+API_SERVER_PORT = 5000
+ALARM_FILE = "alarmas.json"
+
+
+# =========================
+# Utilidades de alarmas
+# =========================
+if os.path.exists(ALARM_FILE):
+    with open(ALARM_FILE, "r", encoding="utf-8") as f:
+        alarmas = json.load(f)
+else:
+    alarmas = []
+
+def guardar_alarmas():
+    with open(ALARM_FILE, "w", encoding="utf-8") as f:
+        json.dump(alarmas, f)
+
+def get_updates(offset=None):
     try:
-        r = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        for s in data.get("symbols", []):
-            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
-                base = s["baseAsset"].lower()
-                _symbol_cache[base] = s["symbol"]
+        response = requests.get(f"{API_URL}/getUpdates", params={"offset": offset, "timeout": 20}, timeout=30)
+        return response.json()
     except Exception as e:
-        print(f"⚠️ No se pudo construir caché de símbolos: {e}")
+        print(f"⚠️ get_updates error: {e}")
+        return {"result": []}
 
+def send_message(chat_id, text):
+    print(f"✉️ Enviando mensaje a {chat_id}: {text}")
+    try:
+        url = f"{API_URL}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text}
+        response = requests.post(url, json=payload, timeout=20)
+        print(f"📡 Respuesta de Telegram: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"⚠️ Error send_message: {e}")
+
+def verificar_alarmas_tick():
+    # Alarmas de precio (CoinGecko)
+    for alarma in alarmas[:]:
+        if "precio_objetivo" in alarma:
+            moneda = alarma["moneda"]
+            chat_id = alarma["chat_id"]
+            try:
+                r = requests.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={"ids": moneda, "vs_currencies": "usd"},
+                    timeout=20
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    precio_actual = data.get(moneda, {}).get("usd", 0)
+                    if precio_actual >= alarma["precio_objetivo"]:
+                        send_message(chat_id, f"🚨 ¡{moneda.upper()} ha alcanzado ${precio_actual:.2f}!")
+                        alarmas.remove(alarma)
+                        guardar_alarmas()
+            except Exception as e:
+                print(f"⚠️ Error verificando alarma de precio: {e}")
+
+    # Alarmas de volumen (verde/rojo) usando mini-API interna
+    for alarma in alarmas[:]:
+        if "tipo_volumen" in alarma:
+            moneda = alarma["moneda"]
+            chat_id = alarma["chat_id"]
+            tipo = alarma["tipo_volumen"]  # 'verde' | 'rojo'
+            umbral = alarma.get("umbral", 30000 if tipo == "verde" else 60000)
+            try:
+                r = requests.get(CRYPTO_API, params={"name": moneda}, timeout=20)
+                if r.status_code == 200:
+                    data = r.json()
+                    volumen = data.get("volumen_verde" if tipo == "verde" else "volumen_rojo", 0)
+                    if volumen > umbral:
+                        color = "🟢" if tipo == "verde" else "🔴"
+                        send_message(chat_id, f"{color} ¡Alerta! Volumen {tipo.upper()} de {moneda.upper()} supera {umbral}: {volumen}")
+                        alarmas.remove(alarma)
+                        guardar_alarmas()
+            except Exception as e:
+                print(f"⚠️ Error verificando volumen: {e}")
+
+
+# =========================
+# Mini-API Flask interna (5001)
+# =========================
 def run_flask():
+    from flask import Flask, request, jsonify
+    BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+    _symbol_cache = {}
+
+    def _build_symbol_cache():
+        nonlocal _symbol_cache
+        try:
+            r = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            for s in data.get("symbols", []):
+                if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                    base = s["baseAsset"].lower()
+                    _symbol_cache[base] = s["symbol"]
+        except Exception as e:
+            print(f"⚠️ No se pudo construir caché de símbolos: {e}")
+
     app = Flask(__name__)
     _build_symbol_cache()
 
     @app.route('/crypto-data-actual')
     def crypto_data():
+        """
+        Devuelve volumen verde/rojo y precio actual (1h, últimas 10 velas) desde Binance.
+        """
         name = request.args.get("name", "bitcoin").lower()
-
-        # Alias comunes → símbolos
         alias_map = {
             "bitcoin": "btc",
             "ethereum": "eth",
@@ -41,7 +142,6 @@ def run_flask():
         }
         name = alias_map.get(name, name)
 
-
         if not _symbol_cache:
             _build_symbol_cache()
 
@@ -51,17 +151,13 @@ def run_flask():
 
         try:
             url = "https://api.binance.com/api/v3/klines"
-            params = {
-                "symbol": symbol,
-                "interval": "1h",
-                "limit": 10
-            }
-            r = requests.get(url, params=params, timeout=10)
+            params = {"symbol": symbol, "interval": "1h", "limit": 10}
+            r = requests.get(url, params=params, timeout=12)
             r.raise_for_status()
             data = r.json()
 
-            volumen_rojo = 0
-            volumen_verde = 0
+            volumen_rojo = 0.0
+            volumen_verde = 0.0
             precio_actual = float(data[-1][4])
 
             for vela in data:
@@ -81,87 +177,13 @@ def run_flask():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
-    app.run(host="127.0.0.1", port=5000)
+    # IMPORTANTE: correr en 5001
+    app.run(host="127.0.0.1", port=LOCAL_FLASK_PORT)
 
 
-import requests
-import time
-import json
-import os
-
-print("🔥 Iniciando bot_listener")
-BOT_TOKEN = "7674766197:AAEwF84b6WR40XWpbilzo5DpzgowKk1K454"
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-CRYPTO_API = "http://127.0.0.1:5000/crypto-data-actual"
-ALARM_FILE = "alarmas.json"
-
-if os.path.exists(ALARM_FILE):
-    with open(ALARM_FILE, "r") as f:
-        alarmas = json.load(f)
-else:
-    alarmas = []
-
-def guardar_alarmas():
-    with open(ALARM_FILE, "w") as f:
-        json.dump(alarmas, f)
-
-def get_updates(offset=None):
-    response = requests.get(f"{API_URL}/getUpdates", params={"offset": offset})
-    return response.json()
-
-def send_message(chat_id, text):
-    print(f"✉️ Enviando mensaje a {chat_id}: {text}")
-    url = f"{API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    response = requests.post(url, json=payload)
-    print(f"📡 Respuesta de Telegram: {response.status_code} - {response.text}")
-
-def verificar_alarmas_tick():
-    for alarma in alarmas[:]:
-        if "precio_objetivo" in alarma:
-            moneda = alarma["moneda"]
-            chat_id = alarma["chat_id"]
-            try:
-                r = requests.get(f"https://api.coingecko.com/api/v3/simple/price", params={"ids": moneda, "vs_currencies": "usd"})
-                if r.status_code == 200:
-                    data = r.json()
-                    precio_actual = data.get(moneda, {}).get("usd", 0)
-                    if precio_actual >= alarma["precio_objetivo"]:
-                        send_message(chat_id, f"🚨 ¡{moneda.upper()} ha alcanzado ${precio_actual:.2f}!")
-                        alarmas.remove(alarma)
-                        guardar_alarmas()
-            except Exception as e:
-                print(f"⚠️ Error verificando alarma de precio: {e}")
-
-        if "tipo_volumen" in alarma:
-            moneda = alarma["moneda"]
-            chat_id = alarma["chat_id"]
-            tipo = alarma["tipo_volumen"]
-            umbral = alarma.get("umbral", 30000 if tipo == "verde" else 60000)
-            try:
-                r = requests.get(CRYPTO_API, params={"name": moneda})
-                if r.status_code == 200:
-                    data = r.json()
-                    volumen = data.get("volumen_verde" if tipo == "verde" else "volumen_rojo", 0)
-                    if volumen > umbral:
-                        color = "🟢" if tipo == "verde" else "🔴"
-                        send_message(chat_id, f"{color} ¡Alerta! Volumen {tipo.upper()} de {moneda.upper()} supera {umbral}: {volumen}")
-                        alarmas.remove(alarma)
-                        guardar_alarmas()
-            except Exception as e:
-                print(f"⚠️ Error verificando volumen: {e}")
-
-def main():
-    print("📱 Escuchando mensajes del bot...")
-    offset = None
-    while True:
-        updates = get_updates(offset)
-        for update in updates.get("result", []):
-            offset = update["update_id"] + 1
-            handle_message(update["message"])
-        verificar_alarmas_tick()
-        time.sleep(15)
-
+# =========================
+# Lógica del Bot
+# =========================
 def handle_message(message):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
@@ -169,17 +191,71 @@ def handle_message(message):
     if text.lower().startswith("/ayuda"):
         ayuda = (
             "📘 Comandos disponibles:\n"
-            "/precio <moneda> <días> — Análisis histórico.\n"
-            "/alarma <moneda> <precio> — Alerta si el precio sube.\n"
+            "/precio <moneda> <días> — Análisis histórico (Coingecko) + volumen 1h (Binance).\n"
+            "/alarma <moneda> <precio> — Alerta si el precio sube hasta el objetivo.\n"
             "/alarmas — Lista tus alarmas.\n"
-            "/eliminaralarma <moneda> — Borra una alarma.\n"
-            "/crypto precio <moneda> — Precio actual desde API externa.\n"
-            "/monedas — Lista algunas monedas compatibles con el bot.\n"
+            "/eliminaralarma <moneda> — Borra una alarma de precio.\n"
             "/alarma volumen <moneda> <verde|rojo> <umbral> — Alerta de volumen personalizada.\n"
-            "/eliminarvolumen <moneda> <verde|rojo> — Elimina una alarma de volumen."
+            "/eliminarvolumen <moneda> <verde|rojo> — Elimina una alarma de volumen.\n"
+            "/EMA <moneda> <intervalo> <velas> — Gráfica con EMAs 20, 50, 100 y 200.\n"
+            "   Ej: /EMA doge 1h 50"
         )
         send_message(chat_id, ayuda)
 
+    elif text.lower().startswith("/ema"):
+        partes = text.split()
+        if len(partes) == 4:
+            par = partes[1].lower()
+            intervalo = partes[2]
+            try:
+                num_velas = int(partes[3])
+
+                base_url = f"http://127.0.0.1:{API_SERVER_PORT}{API_PREFIX}/ema-graph"
+                print(f"🔎 GET {base_url} par={par} intervalo={intervalo} num_velas={num_velas}")
+
+                # Intento 1: pedir JSON para usar file_url (imagen guardada en static/ema/telegram/)
+                r = requests.get(
+                    base_url,
+                    params={
+                        "par": par,
+                        "intervalo": intervalo,
+                        "num_velas": num_velas,
+                        "mode": "json",
+                        "save_dir": "telegram"
+                    },
+                    timeout=20
+                )
+
+                if r.status_code == 200:
+                    data = r.json()
+                    file_url = data.get("file_url")
+
+                    if file_url:
+                        img = requests.get(f"http://127.0.0.1:5000{file_url}", timeout=20).content
+                    else:
+                        # Fallback: pedir PNG directo si no hay file_url
+                        png = requests.get(
+                            base_url,
+                            params={"par": par, "intervalo": intervalo, "num_velas": num_velas},
+                            timeout=20
+                        )
+                        png.raise_for_status()
+                        img = png.content
+
+                    files = {'photo': ('ema.png', img, 'image/png')}
+                    requests.post(f"{API_URL}/sendPhoto", data={'chat_id': chat_id}, files=files)
+
+                else:
+                    try:
+                        error_msg = r.json().get("error", "Error desconocido")
+                    except:
+                        error_msg = r.text or "Respuesta vacía o inesperada del servidor"
+                    send_message(chat_id, f"❌ Error generando la gráfica: {error_msg}")
+
+            except Exception as e:
+                send_message(chat_id, f"⚠️ Error procesando el comando: {e}")
+        else:
+            send_message(chat_id, "❗ Usa el formato: /EMA <moneda> <intervalo> <número de velas>")
 
     elif text.lower().startswith("/precio"):
         partes = text.split()
@@ -187,24 +263,24 @@ def handle_message(message):
             moneda = partes[1].lower()
             try:
                 dias = int(partes[2])
-                # Consultar datos históricos (precio)
+                # Precio histórico (Coingecko)
                 url = f"https://api.coingecko.com/api/v3/coins/{moneda}/market_chart"
                 params = {"vs_currency": "usd", "days": dias}
-                r = requests.get(url, params=params)
+                r = requests.get(url, params=params, timeout=20)
                 precios = []
                 if r.status_code == 200:
                     data = r.json()
                     precios = [p[1] for p in data.get("prices", []) if isinstance(p, list) and len(p) == 2]
-                
-                # Consultar datos de volumen actual (verde y rojo)
-                r_vol = requests.get(CRYPTO_API, params={"name": moneda})
+
+                # Volumen actual (mini-API interna en 5001)
+                r_vol = requests.get(CRYPTO_API, params={"name": moneda}, timeout=20)
                 volumen_verde = volumen_rojo = None
                 if r_vol.status_code == 200:
                     data_vol = r_vol.json()
                     volumen_verde = data_vol.get("volumen_verde", 0)
                     volumen_rojo = data_vol.get("volumen_rojo", 0)
-                    
-                # Preparar mensaje
+
+                # Mensaje
                 if precios:
                     max_price = max(precios)
                     min_price = min(precios)
@@ -213,7 +289,6 @@ def handle_message(message):
                     pct_bajo_max = ((max_price - actual) / max_price) * 100 if max_price else 0
                     pct_sobre_min = ((actual - min_price) / min_price) * 100 if min_price else 0
 
-                    # Etiquetas descriptivas
                     if pct_bajo_max < 2:
                         max_label = "✅ muy cerca del máximo"
                     elif pct_bajo_max > 10:
@@ -237,14 +312,12 @@ def handle_message(message):
 
                     if volumen_verde is not None and volumen_rojo is not None:
                         msg += (
-                            f"\n\n📦 Volumen 1h:\n"
+                            f"\n\n📦 Volumen 1h (Binance):\n"
                             f"🟢 Verde: {volumen_verde:.2f}\n"
                             f"🔴 Rojo: {volumen_rojo:.2f}"
                         )
                 else:
                     msg = "⚠️ No se encontraron datos válidos para el precio."
-
-                           
 
             except Exception as e:
                 msg = f"⚠️ Error al obtener datos: {e}"
@@ -339,12 +412,12 @@ def handle_message(message):
         if len(partes) == 3:
             moneda = partes[2].lower()
             try:
-                r = requests.get(CRYPTO_API, params={"name": moneda})
+                r = requests.get(CRYPTO_API, params={"name": moneda}, timeout=20)
                 if r.status_code == 200:
                     data = r.json()
-                    precio = data.get("precio_usd")
+                    precio = data.get("precio")  # la mini-API devuelve "precio"
                     if precio is not None:
-                        send_message(chat_id, f"💰 El precio de {moneda.upper()} es: ${precio:.2f} USD")
+                        send_message(chat_id, f"💰 El precio de {moneda.upper()} es: ${precio:.4f} USD")
                     else:
                         send_message(chat_id, f"⚠️ No se encontró el precio de {moneda.upper()}.")
                 else:
@@ -354,23 +427,22 @@ def handle_message(message):
         else:
             send_message(chat_id, "❗ Usa el formato: /crypto precio bitcoin")
 
-    elif text.lower() == "/monedas":
-        try:
-            ids_url = "https://api.coingecko.com/api/v3/coins/list"
-            response = requests.get(ids_url)
-            data = response.json()
-            nombres = [f"{item['id']} ({item['symbol'].upper()})" for item in data[:100]]
-            mensaje = "🪙 Algunas monedas compatibles:\n" + "\n".join(nombres)
-            mensaje += "\n\n🔎 Puedes consultar más monedas en: https://www.coingecko.com/es"
-        except Exception as e:
-            mensaje = f"⚠️ Error al obtener lista de monedas: {e}"
-        send_message(chat_id, mensaje)
 
-import threading
+def main():
+    print("📱 Escuchando mensajes del bot...")
+    offset = None
+    while True:
+        updates = get_updates(offset)
+        for update in updates.get("result", []):
+            offset = update["update_id"] + 1
+            if "message" in update:
+                handle_message(update["message"])
+        verificar_alarmas_tick()
+        time.sleep(2)
 
-# --- Servidor Flask corriendo en segundo plano ---
+
+# --- Servidor Flask interno (5001) en segundo plano ---
 threading.Thread(target=run_flask, daemon=True).start()
-
 
 if __name__ == "__main__":
     main()
