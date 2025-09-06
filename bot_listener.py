@@ -10,22 +10,21 @@ print("🔥 Iniciando bot_listener")
 # =========================
 # Configuración principal
 # =========================
-BOT_TOKEN = "7674766197:AAEwF84b6WR40XWpbilzo5DpzgowKk1K454"  # <-- PON AQUÍ TU TOKEN DE TELEGRAM
+BOT_TOKEN = "7674766197:AAEwF84b6WR40XWpbilzo5DpzgowKk1K454"  # tu token
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Mini-API interna del bot (NO chocar con application.py en 5000)
 LOCAL_FLASK_PORT = 5001
 CRYPTO_API = f"http://127.0.0.1:{LOCAL_FLASK_PORT}/crypto-data-actual"
 
-# Tu application.py imprimió prefijo VACÍO => deja cadena vacía
-# Si algún día imprime "/api", cambia a: API_PREFIX = "/api"
+# Tu application.py imprime prefijo VACÍO => deja cadena vacía
 API_PREFIX = ""
 API_SERVER_PORT = 5000
+
 ALARM_FILE = "alarmas.json"
 
-
 # =========================
-# Utilidades de alarmas
+# Utilidades de alarmas (persistencia)
 # =========================
 if os.path.exists(ALARM_FILE):
     with open(ALARM_FILE, "r", encoding="utf-8") as f:
@@ -55,8 +54,101 @@ def send_message(chat_id, text):
     except Exception as e:
         print(f"⚠️ Error send_message: {e}")
 
+# =========================
+# Helpers de EMA + Binance (tolerancia AUTO = 1 tick)
+# =========================
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+_ALLOWED_INTERVALS = {"1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d"}
+
+_symbol_cache_global = {}   # base -> SYMBOLUSDT
+_symbol_meta_global = {}    # SYMBOL -> {"tickSize": float}
+_ema_check_last = {}        # throttle de chequeo por alarma
+
+def _build_symbol_cache_global():
+    """Carga símbolo base→SYMBOLUSDT una sola vez."""
+    global _symbol_cache_global
+    if _symbol_cache_global:
+        return
+    try:
+        r = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        for s in data.get("symbols", []):
+            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                _symbol_cache_global[s["baseAsset"].lower()] = s["symbol"]
+    except Exception as e:
+        print(f"⚠️ No se pudo construir caché de símbolos (EMA): {e}")
+
+def _symbol_for(moneda: str):
+    """Normaliza alias y devuelve SYMBOLUSDT o None."""
+    alias_map = {
+        "bitcoin": "btc", "ethereum": "eth", "binance coin": "bnb", "dogecoin": "doge",
+        "solana": "sol", "cardano": "ada", "ripple": "xrp", "polkadot": "dot",
+        "litecoin": "ltc", "tron": "trx"
+    }
+    base = alias_map.get(moneda.lower(), moneda.lower())
+    _build_symbol_cache_global()
+    return _symbol_cache_global.get(base)
+
+def _get_tick_size(symbol: str):
+    """Devuelve tickSize para SYMBOL (cachea). Si falla, None."""
+    try:
+        meta = _symbol_meta_global.get(symbol)
+        if meta and "tickSize" in meta:
+            return float(meta["tickSize"])
+        # Cargar desde /exchangeInfo
+        r = requests.get(BINANCE_EXCHANGE_INFO_URL, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        for s in data.get("symbols", []):
+            if s.get("symbol") == symbol:
+                tick = None
+                for f in s.get("filters", []):
+                    if f.get("filterType") == "PRICE_FILTER":
+                        tick = float(f.get("tickSize"))
+                        break
+                if tick is not None:
+                    _symbol_meta_global[symbol] = {"tickSize": tick}
+                    return tick
+                break
+    except Exception as e:
+        print(f"⚠️ No se pudo obtener tickSize para {symbol}: {e}")
+    return None
+
+def _ema(values, period: int):
+    """EMA clásica con semilla SMA."""
+    k = 2.0 / (period + 1.0)
+    ema_vals = []
+    ema_prev = None
+    for i, v in enumerate(values):
+        if i < period - 1:
+            ema_vals.append(float("nan"))
+        elif i == period - 1:
+            sma = sum(values[:period]) / float(period)
+            ema_vals.append(sma)
+            ema_prev = sma
+        else:
+            ema_t = (v * k) + (ema_prev * (1 - k))
+            ema_vals.append(ema_t)
+            ema_prev = ema_t
+    return ema_vals
+
+def _price_and_ema(symbol: str, intervalo: str, period: int):
+    """Devuelve (precio_actual, ema_period) para símbolo/intervalo."""
+    limit = max(period + 5, 50)
+    r = requests.get(BINANCE_KLINES_URL, params={"symbol": symbol, "interval": intervalo, "limit": limit}, timeout=12)
+    r.raise_for_status()
+    data = r.json()
+    closes = [float(k[4]) for k in data]
+    ema_series = _ema(closes, period)
+    return closes[-1], ema_series[-1]
+
+# =========================
+# Verificador de alarmas (precio, volumen, EMA)
+# =========================
 def verificar_alarmas_tick():
-    # Alarmas de precio (CoinGecko)
+    # --- Alarmas de precio (CoinGecko)
     for alarma in alarmas[:]:
         if "precio_objetivo" in alarma:
             moneda = alarma["moneda"]
@@ -77,7 +169,7 @@ def verificar_alarmas_tick():
             except Exception as e:
                 print(f"⚠️ Error verificando alarma de precio: {e}")
 
-    # Alarmas de volumen (verde/rojo) usando mini-API interna
+    # --- Alarmas de volumen (verde/rojo) usando mini-API interna
     for alarma in alarmas[:]:
         if "tipo_volumen" in alarma:
             moneda = alarma["moneda"]
@@ -97,6 +189,49 @@ def verificar_alarmas_tick():
             except Exception as e:
                 print(f"⚠️ Error verificando volumen: {e}")
 
+    # --- Alarmas de EMA (precio toca EMA N con tolerancia 'auto' o manual)
+    for alarma in alarmas[:]:
+        if "ema_period" in alarma:
+            moneda = alarma["moneda"]
+            chat_id = alarma["chat_id"]
+            intervalo = alarma.get("intervalo", "1h")
+            periodo = int(alarma["ema_period"])
+            tol_cfg = alarma.get("tolerancia", "auto")  # 'auto' o float (fracción)
+
+            # throttle: 1 petición / 30s por alarma
+            key = (chat_id, moneda, intervalo, periodo)
+            now = time.time()
+            if now - _ema_check_last.get(key, 0) < 30:
+                continue
+            _ema_check_last[key] = now
+
+            try:
+                symbol = _symbol_for(moneda)
+                if not symbol:
+                    continue
+                price, ema_val = _price_and_ema(symbol, intervalo, periodo)
+                if not (price and ema_val):
+                    continue
+
+                if isinstance(tol_cfg, str) and tol_cfg.lower() == "auto":
+                    tick = _get_tick_size(symbol) or 0.0
+                    touched = abs(price - ema_val) <= max(tick, 0.0)
+                    tol_msg = "auto (1 tick)"
+                else:
+                    tol = float(tol_cfg)
+                    touched = (abs(price - ema_val) / ema_val) <= tol
+                    tol_msg = f"±{tol*100:.4f}%"
+
+                if touched:
+                    send_message(
+                        chat_id,
+                        f"📣 {moneda.upper()} {intervalo}: precio {price:.6f} tocó EMA{periodo} ({ema_val:.6f}) {tol_msg}"
+                    )
+                    alarmas.remove(alarma)
+                    guardar_alarmas()
+
+            except Exception as e:
+                print(f"⚠️ Error verificando alarma EMA ({moneda} {intervalo} EMA{periodo}): {e}")
 
 # =========================
 # Mini-API Flask interna (5001)
@@ -180,9 +315,8 @@ def run_flask():
     # IMPORTANTE: correr en 5001
     app.run(host="127.0.0.1", port=LOCAL_FLASK_PORT)
 
-
 # =========================
-# Lógica del Bot
+# Lógica del Bot (comandos)
 # =========================
 def handle_message(message):
     chat_id = message["chat"]["id"]
@@ -190,17 +324,58 @@ def handle_message(message):
 
     if text.lower().startswith("/ayuda"):
         ayuda = (
-            "📘 Comandos disponibles:\n"
-            "/precio <moneda> <días> — Análisis histórico (Coingecko) + volumen 1h (Binance).\n"
-            "/alarma <moneda> <precio> — Alerta si el precio sube hasta el objetivo.\n"
-            "/alarmas — Lista tus alarmas.\n"
-            "/eliminaralarma <moneda> — Borra una alarma de precio.\n"
-            "/alarma volumen <moneda> <verde|rojo> <umbral> — Alerta de volumen personalizada.\n"
-            "/eliminarvolumen <moneda> <verde|rojo> — Elimina una alarma de volumen.\n"
-            "/EMA <moneda> <intervalo> <velas> — Gráfica con EMAs 20, 50, 100 y 200.\n"
-            "   Ej: /EMA doge 1h 50"
+            "🤖 *CriptoIQ — Ayuda rápida*\n"
+            "\n"
+            "Aquí tienes lo que puedo hacer. Usa los *formatos exactos* y los ejemplos al final 👇\n"
+            "\n"
+            "📈 *Gráficas y Análisis*\n"
+            "• /EMA <moneda> <intervalo> <velas>\n"
+            "  └ Gráfica con EMAs 20/50/100/200.\n"
+            "• /precio <moneda> <días>\n"
+            "  └ Resumen de precio (Coingecko) y volumen 1h (Binance).\n"
+            "\n"
+            "⏰ *Alarmas de Precio*\n"
+            "• /alarma <moneda> <precio>\n"
+            "  └ Te aviso cuando el precio *toque o supere* ese valor.\n"
+            "• /eliminaralarma <moneda>\n"
+            "  └ Elimina tu alarma de precio para esa moneda.\n"
+            "\n"
+            "📦 *Alarmas de Volumen*\n"
+            "• /alarma volumen <moneda> <verde|rojo> <umbral>\n"
+            "  └ Alerta cuando el *volumen verde/rojo 1h* supere el umbral.\n"
+            "• /eliminarvolumen <moneda> <verde|rojo>\n"
+            "  └ Elimina la alarma de volumen indicada.\n"
+            "\n"
+            "📐 *Alarmas EMA (toque de media exponencial)*\n"
+            "• /alarma ema <moneda> <intervalo> <periodo> [tolerancia%|auto]\n"
+            "  └ Te aviso cuando el precio *toque* la EMA indicada.\n"
+            "  └ *tolerancia*: por defecto es *auto* (= 1 tick de Binance, lo más preciso posible).\n"
+            "• /eliminaralarma ema <moneda> <intervalo> <periodo>\n"
+            "  └ Elimina esa alarma EMA.\n"
+            "\n"
+            "🗂️ *Gestión*\n"
+            "• /alarmas\n"
+            "  └ Lista todas tus alarmas activas (precio, volumen y EMA).\n"
+            "• /crypto precio <moneda>\n"
+            "  └ Precio rápido + volumen actual (consulta interna).\n"
+            "\n"
+            "🧭 *Notas*\n"
+            "• *Intervalos válidos:* 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d\n"
+            "• Puedes usar nombres o símbolos comunes (ej: *bitcoin* o *btc*, *dogecoin* o *doge*).\n"
+            "• Las alarmas se disparan *una vez* y luego se eliminan automáticamente.\n"
+            "\n"
+            "🧪 *Ejemplos*\n"
+            "• /EMA doge 1h 50\n"
+            "• /precio bitcoin 30\n"
+            "• /alarma btc 65000\n"
+            "• /alarma volumen eth verde 5000\n"
+            "• /alarma ema doge 1h 50          ← tolerancia auto (1 tick)\n"
+            "• /alarma ema doge 1h 50 0.10%     ← tolerancia manual\n"
+            "• /eliminaralarma ema doge 1h 50\n"
+            "• /alarmas\n"
         )
         send_message(chat_id, ayuda)
+
 
     elif text.lower().startswith("/ema"):
         partes = text.split()
@@ -213,7 +388,7 @@ def handle_message(message):
                 base_url = f"http://127.0.0.1:{API_SERVER_PORT}{API_PREFIX}/ema-graph"
                 print(f"🔎 GET {base_url} par={par} intervalo={intervalo} num_velas={num_velas}")
 
-                # Intento 1: pedir JSON para usar file_url (imagen guardada en static/ema/telegram/)
+                # Intento: pedir JSON para usar file_url (imagen guardada en static/ema/telegram/)
                 r = requests.get(
                     base_url,
                     params={
@@ -256,6 +431,60 @@ def handle_message(message):
                 send_message(chat_id, f"⚠️ Error procesando el comando: {e}")
         else:
             send_message(chat_id, "❗ Usa el formato: /EMA <moneda> <intervalo> <número de velas>")
+
+    # ---------- NUEVO: /alarma ema ----------
+    elif text.lower().startswith("/alarma ema"):
+        # /alarma ema <moneda> <intervalo> <periodoEMA> [tolerancia%|auto]
+        partes = text.split()
+        if len(partes) in (5, 6):
+            _, _, moneda, intervalo, periodo_str, *rest = partes
+            moneda = moneda.lower()
+            try:
+                if intervalo not in _ALLOWED_INTERVALS:
+                    send_message(chat_id, f"⚠️ Intervalo inválido. Usa uno de: {', '.join(sorted(_ALLOWED_INTERVALS))}")
+                    return
+                periodo = int(periodo_str)
+                if periodo <= 0:
+                    raise ValueError()
+
+                # Tolerancia: por defecto 'auto' (1 tick). Si pasan %, la usamos.
+                tol = "auto"
+                if rest:
+                    raw = rest[0].strip().lower()
+                    if raw != "auto":
+                        t = raw.replace("%", "")
+                        tol = float(t) / 100.0
+
+                # Validar símbolo
+                symbol = _symbol_for(moneda)
+                if not symbol:
+                    send_message(chat_id, f"⚠️ Moneda '{moneda}' no soportada en Binance/USDT.")
+                    return
+
+                # Si ya existe esa alarma, actualizar
+                for a in alarmas:
+                    if a["chat_id"] == chat_id and a.get("moneda") == moneda and a.get("ema_period") == periodo and a.get("intervalo") == intervalo:
+                        a["tolerancia"] = tol
+                        guardar_alarmas()
+                        tol_txt = "auto (1 tick)" if (isinstance(tol, str) and tol == "auto") else f"±{tol*100:.4f}%"
+                        send_message(chat_id, f"🔄 Alarma EMA{periodo} de {moneda.upper()} @ {intervalo} actualizada ({tol_txt}).")
+                        return
+
+                alarmas.append({
+                    "chat_id": chat_id,
+                    "moneda": moneda,
+                    "intervalo": intervalo,
+                    "ema_period": periodo,
+                    "tolerancia": tol
+                })
+                guardar_alarmas()
+                tol_txt = "auto (1 tick)" if (isinstance(tol, str) and tol == "auto") else f"±{tol*100:.4f}%"
+                send_message(chat_id, f"⏰ Alarma creada: {moneda.upper()} toca EMA{periodo} en {intervalo} ({tol_txt}).")
+
+            except Exception:
+                send_message(chat_id, "⚠️ Formato: /alarma ema <moneda> <intervalo> <periodoEMA> [tolerancia%|auto]\nEj: /alarma ema doge 1h 50 auto")
+        else:
+            send_message(chat_id, "⚠️ Formato: /alarma ema <moneda> <intervalo> <periodoEMA> [tolerancia%|auto]")
 
     elif text.lower().startswith("/precio"):
         partes = text.split()
@@ -373,7 +602,31 @@ def handle_message(message):
 
     elif text.lower().startswith("/eliminaralarma"):
         partes = text.split()
-        if len(partes) == 2:
+
+        # Forma EMA: /eliminaralarma ema <moneda> <intervalo> <periodo>
+        if len(partes) == 5 and partes[1].lower() == "ema":
+            _, _, moneda, intervalo, periodo_str = partes
+            moneda = moneda.lower()
+            try:
+                periodo = int(periodo_str)
+            except:
+                send_message(chat_id, "⚠️ Periodo inválido.")
+                return
+
+            prev = len(alarmas)
+            alarmas[:] = [
+                a for a in alarmas
+                if not (a["chat_id"] == chat_id and a.get("moneda") == moneda
+                        and a.get("intervalo") == intervalo and a.get("ema_period") == periodo)
+            ]
+            if len(alarmas) < prev:
+                guardar_alarmas()
+                send_message(chat_id, f"🗑️ Alarma EMA{periodo} de {moneda.upper()} @ {intervalo} eliminada.")
+            else:
+                send_message(chat_id, f"⚠️ No se encontró esa alarma EMA.")
+
+        # Forma precio: /eliminaralarma <moneda>
+        elif len(partes) == 2:
             moneda = partes[1].lower()
             prev = len(alarmas)
             alarmas[:] = [a for a in alarmas if not (a["chat_id"] == chat_id and a.get("moneda") == moneda and "precio_objetivo" in a)]
@@ -382,6 +635,8 @@ def handle_message(message):
                 send_message(chat_id, f"🗑️ Alarma de {moneda.upper()} eliminada.")
             else:
                 send_message(chat_id, f"⚠️ No había alarma de {moneda.upper()}.")
+        else:
+            send_message(chat_id, "⚠️ Usa:\n• /eliminaralarma <moneda>\n• /eliminaralarma ema <moneda> <intervalo> <periodo>")
 
     elif text.lower().startswith("/eliminarvolumen"):
         partes = text.split()
@@ -400,12 +655,20 @@ def handle_message(message):
         if not user_alarmas:
             send_message(chat_id, "⛔ No tienes alarmas activas.")
             return
-        mensaje = "🔔 Tus alarmas:\n" + "\n".join(
-            f"• {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}" if "precio_objetivo" in a else
-            f"• Volumen {a['tipo_volumen'].upper()} de {a['moneda'].upper()} > {a['umbral']}"
-            for a in user_alarmas
-        )
-        send_message(chat_id, mensaje)
+        lineas = []
+        for a in user_alarmas:
+            if "precio_objetivo" in a:
+                lineas.append(f"• PRECIO: {a['moneda'].upper()} a ${a['precio_objetivo']:.2f}")
+            elif "tipo_volumen" in a:
+                lineas.append(f"• VOLUMEN: {a['moneda'].upper()} {a['tipo_volumen'].upper()} > {a['umbral']}")
+            elif "ema_period" in a:
+                tol_cfg = a.get("tolerancia", "auto")
+                if isinstance(tol_cfg, str) and tol_cfg.lower() == "auto":
+                    tol_txt = "auto"
+                else:
+                    tol_txt = f"±{float(tol_cfg)*100:.4f}%"
+                lineas.append(f"• EMA: {a['moneda'].upper()} EMA{a['ema_period']} @ {a.get('intervalo','1h')} ({tol_txt})")
+        send_message(chat_id, "🔔 Tus alarmas:\n" + "\n".join(lineas))
 
     elif text.lower().startswith("/crypto precio"):
         partes = text.split()
@@ -427,7 +690,6 @@ def handle_message(message):
         else:
             send_message(chat_id, "❗ Usa el formato: /crypto precio bitcoin")
 
-
 def main():
     print("📱 Escuchando mensajes del bot...")
     offset = None
@@ -439,7 +701,6 @@ def main():
                 handle_message(update["message"])
         verificar_alarmas_tick()
         time.sleep(2)
-
 
 # --- Servidor Flask interno (5001) en segundo plano ---
 threading.Thread(target=run_flask, daemon=True).start()
