@@ -9,6 +9,19 @@ import re
 # =========================
 import os, json, time, random
 
+from scripts.db import get_latest_price
+
+def cmd_precio(update, context):
+    coin = "bitcoin"  # o parsear del mensaje
+    row = get_latest_price(coin)
+    if not row:
+        update.message.reply_text("Aún no tengo datos guardados en la BD. Espera al scheduler.")
+        return
+
+    coin, ts, price = row
+    update.message.reply_text(f"{coin.upper()} (BD)\n{ts}\nPrecio: ${float(price):,.2f}")
+
+
 def _yahoo_cache_path(ticker: str, interval: str, range_: str) -> str:
     safe = f"{ticker}_{interval}_{range_}".replace("/", "_").replace(":", "_").replace("!", "1")
     return f"/tmp/yahoo_{safe}.json"

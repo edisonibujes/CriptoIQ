@@ -2,6 +2,8 @@
 from flask_restful import Resource
 from flask import request
 from scripts.data_ingestion_service import DataIngestionService
+from scripts.data_processing_service import DataProcessingService
+
 from flasgger import swag_from
 import requests
 
