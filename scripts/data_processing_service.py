@@ -25,10 +25,20 @@ class DataProcessingService:
     def calculate_derived_metrics(self, df, price_col='price', timestamp_col='timestamp'):
         print("Calculando métricas derivadas...")
         df = df.sort_values(by=timestamp_col)
-        df['daily_return'] = df[price_col].pct_change()
-        df['moving_avg_7'] = df[price_col].rolling(window=7).mean()
-        df['moving_avg_30'] = df[price_col].rolling(window=30).mean()
+
+        # Renombrar a "precio" para que coincida con tu tabla
+        if price_col != "precio":
+            df["precio"] = df[price_col]
+        else:
+            df["precio"] = df["precio"]
+
+        df["moving_avg_20"] = df["precio"].rolling(window=20).mean()
+        df["moving_avg_50"] = df["precio"].rolling(window=50).mean()
+        df["moving_avg_100"] = df["precio"].rolling(window=100).mean()
+        df["moving_avg_200"] = df["precio"].rolling(window=200).mean()
+
         return df
+
 
     def detect_and_handle_outliers(self, df, cols):
         print("Detectando y tratando outliers...")
